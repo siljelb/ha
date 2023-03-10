@@ -1,0 +1,278 @@
+blueprint:
+  name: Heat automation
+  domain: automation
+  input:
+    climate_target:
+      name: Thermostat
+      description: Thermostat to be controlled
+      selector:
+        entity:
+          domain: climate
+    t_current_target:
+      name: T_curr
+      description: Current temperature in room.
+      selector:
+        entity:
+          domain: sensor
+    climate_trigger_t_above:
+      name: Flag T > T_goal
+      description: Flag, it the temperature T above T_goal
+      selector:
+        entity:
+          domain: binary_sensor
+    climate_trigger_t_below:
+      name: Flag T < T_goal - T_delta
+      description: Flag, it the temperature T below T_goal - T_delta
+      selector:
+        entity:
+          domain: binary_sensor
+    open_close_target:
+      name: Door | Window - group
+      description: Group of sensors for switching off the climate in "on"-state
+      selector:
+        entity:
+          domain: group
+    climate_auto_control_target:
+      name: Manual switch for climate 
+      description: Flag for activating / deactivating of climate control
+      selector:
+        entity:
+          domain: input_boolean
+mode: queued
+
+variables:
+  climate_target: !input climate_target
+  t_current_target: !input t_current_target
+  open_close_target: !input open_close_target
+  climate_auto_control_target: !input climate_auto_control_target
+  climate_trigger_t_above: !input climate_trigger_t_above
+  climate_trigger_t_below: !input climate_trigger_t_below
+
+  t_goal: "{{state_attr(climate_target, 'temperature') | float}}"
+  t_current: "{{states[t_current_target].state | float}}"
+
+  debug_mode: 'off'
+  
+trigger:
+  - platform: state
+    entity_id: !input open_close_target
+    for: 00:00:45
+    from: 'off'
+    to: 'on'
+    id: trigger_open
+  - platform: state
+    entity_id: !input open_close_target
+    from: 'on'
+    to: 'off'
+    id: trigger_close
+  - platform: state
+    entity_id: !input climate_auto_control_target
+    from: 'on'
+    to: 'off'
+    id: trigger_steuerung_off
+  - platform: state
+    entity_id: !input climate_auto_control_target
+    from: 'off'
+    to: 'on'
+    id: trigger_steuerung_on
+  - platform: state
+    entity_id: !input climate_trigger_t_above
+    to: 'on'
+    from: 'off'
+    id: trigger_t_above
+  - platform: state
+    entity_id: !input climate_trigger_t_below
+    to: 'on'
+    from: 'off'
+    id: trigger_t_below
+  - platform: state
+    entity_id: !input climate_target
+    to: heat
+    id: climate_to_heat
+  - platform: state
+    entity_id: !input climate_target
+    to: auto
+    id: climate_to_auto
+
+condition: []
+
+action:
+  - choose:
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: trigger_steuerung_off
+      sequence:
+      #  hold_temperature on to off -> check climate on
+      - choose:
+        - conditions: # check if on or auto
+          - condition: not
+            conditions:
+            - condition: state
+              entity_id: !input climate_target
+              state: 'off'
+          sequence:
+          #  climate on -> turn off
+          - service: climate.turn_off
+            data: {}
+            entity_id: !input climate_target
+        default: [] #  climate off -> continue
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: trigger_steuerung_on
+      sequence:
+      #  Called by hold_temperature
+      #  hold_temperature off to on -> check if t < goal
+      - choose:
+        - conditions:
+          - condition: template
+            value_template: '{{ t_current  < t_goal }}'
+          sequence:
+          #  t < goal is true -> check if heat on
+          - choose:
+            - conditions:
+              - condition: state
+                entity_id: !input climate_target
+                state: 'off'
+              sequence:
+              #  climate off -> turn climate to heat mode
+              - service: climate.set_hvac_mode
+                data:
+                  hvac_mode: heat
+                entity_id: !input climate_target
+            default: [] # climate already on -> continue
+        default: [] # t < goal is false -> continue
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: trigger_open
+      sequence:
+      # door/window open -> check hold_temperature
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: !input climate_auto_control_target
+            state: 'on'
+          sequence:
+          #  hold_temperature on -> turn off hold_temperature
+          - service: input_boolean.turn_off
+            data: {}
+            entity_id: !input climate_auto_control_target
+        default:
+        # hold_temperature off -> check climate on
+        - choose:
+          - conditions:
+            - condition: not
+              conditions:
+              - condition: state
+                entity_id: !input climate_target
+                state: 'off'
+            sequence:
+            #  climate on -> turn off
+            - service: climate.turn_off
+              data: {}
+              entity_id: !input climate_target
+          default: [] #climate already off -> continue
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: trigger_close
+      sequence:
+      # door/window closed -> check hold_temperature
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: !input climate_auto_control_target
+            state: 'off'
+          sequence:
+          # hold_temperature off -> turn hold_temperature on
+          - service: input_boolean.turn_on
+            data: {}
+            entity_id: !input climate_auto_control_target
+        default: [] # hold_temperature on -> continue
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: climate_to_auto
+      #  '"climate auto -> 'heat' or 'off'"' 
+      sequence:
+      - choose:
+        - conditions:
+          - condition: template
+            value_template: '{{ t_current  < t_goal }}'
+          sequence:
+          - service: climate.set_hvac_mode
+            data:
+              hvac_mode: heat
+            entity_id: !input climate_target
+        default: 
+        - service: climate.set_hvac_mode
+          data:
+            hvac_mode: 'off'
+          entity_id: !input climate_target
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: climate_to_heat
+      sequence:
+      #  climate to heat -> check if hold_temperature is on
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: !input climate_auto_control_target
+            state: 'off'
+          sequence:
+          # 'by climate on to heat: hold_temperature off -> turn on'
+          - service: input_boolean.turn_on
+            data: {}
+            entity_id: !input climate_auto_control_target
+        default: [] #  'by climate on to heat: hold_temperature on -> continue'
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: trigger_t_above
+      sequence:
+      #  '"T > goal is true -> turn off climate"'
+      - choose:
+        - conditions: # check if on or auto
+          - condition: not
+            conditions:
+            - condition: state
+              entity_id: !input climate_target
+              state: 'off'
+          sequence:
+          - service: climate.turn_off
+            data: {}
+            entity_id: !input climate_target 
+        default: [] #  continue
+###############################################################################
+###############################################################################
+    - conditions:
+      - condition: trigger
+        id: trigger_t_below
+      sequence:
+      #  T < goal - d for sensor or T < goal for climate is true -> check if heat on
+      - choose:
+        - conditions:
+          - condition: state
+            entity_id: !input climate_target
+            state: 'off'
+          sequence:
+          #  climate off -> turn climate to heat
+          - service: climate.set_hvac_mode
+            data:
+              hvac_mode: heat
+            entity_id: !input climate_target
+        default: [] #  climate already on -> continue
+###############################################################################
+###############################################################################
+    default: []  #  Unknown trigger case
+    #  '#### End of automation ####'
